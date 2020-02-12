@@ -7,9 +7,9 @@
 ##' @param x DATRASraw object
 ##' @param ages vector of ages
 ##' @param myids haul.ids for grid
-##' @param kvecP vector with spatial smoother max. basis dimension for each age group, strictly positive part of model 
-##' @param kvecZ vector with spatial smoother max. basis dimension for each age group, presence/absence part of model (ignored for Tweedie models) 
-##' @param gamma model degress of freedom inflation factor (see 'gamma' argument to gam() ) 
+##' @param kvecP vector with spatial smoother max. basis dimension for each age group, strictly positive part of model
+##' @param kvecZ vector with spatial smoother max. basis dimension for each age group, presence/absence part of model (ignored for Tweedie models)
+##' @param gamma model degress of freedom inflation factor (see 'gamma' argument to gam() )
 ##' @param cutOff treat observations below this value as zero
 ##' @param fam distribution, either "Gamma","LogNormal", or "Tweedie".
 ##' @param useBIC use BIC for smoothness selection (overrides 'gamma' argument)
@@ -22,6 +22,7 @@
 ##' @param knotsP optional list of knots to gam, strictly positive repsonses
 ##' @param knotsZ optional list of knots to gam, presence/absence
 ##' @param predfix optional named list of extra variables (besides Gear, HaulDur, Ship, and TimeShotHour),  that should be fixed during prediction step (standardized)
+##' @param useBam if TRUE uses the \code{bam} function that uses less memory and is faster for bigger data sets
 ##' @param ... Optional extra arguments to "gam"
 ##' @return A survey index (list)
 ##' @examples
@@ -43,7 +44,7 @@
 ##'         d<-fixAgeGroup(d,age=a,fun=ifelse(a==min(ages),"min","mean"))
 ##' }
 ##' d<-subset(d,Age>=min(ages))
-##' 
+##'
 ##' ###############################
 ##' ## Convert to numbers-at-age
 ##' ###############################
@@ -53,7 +54,7 @@
 ##' Nage<-mclapply(ALK,predict,mc.cores=mc.cores)
 ##' for(i in 1:length(ALK)) d.ysplit[[i]]$Nage=Nage[[i]];
 ##' dd <- do.call("c",d.ysplit)
-##' 
+##'
 ##' ##############
 ##' ## Fit model
 ##' ##############
@@ -64,22 +65,22 @@
 ##' kvZ <- kvP / 2;
 ##' mP <- rep("Year+s(lon,lat,k=kvecP[a],bs='ts')+s(Depth,bs='ts',k=6)+offset(log(HaulDur))",length(ages)  );
 ##' mZ <- rep("Year+s(lon,lat,k=kvecZ[a],bs='ts')+s(Depth,bs='ts',k=6)+offset(log(HaulDur))",length(ages)  );
-##' 
+##'
 ##' SIQ1 <- getSurveyIdx(dd,ages=ages,myids=grid[[3]],cutOff=0.1,kvecP=kvP,kvecZ=kvZ,
-##'          modelZ=mZ,modelP=mP,mc.cores=mc.cores) ## if errors are encountered, debug with mc.cores=1 
-##' 
+##'          modelZ=mZ,modelP=mP,mc.cores=mc.cores) ## if errors are encountered, debug with mc.cores=1
+##'
 ##' strat.mean<-getSurveyIdxStratMean(dd,ages)
-##' 
+##'
 ##' ## plot indices, distribution map, and estimated depth effects
 ##' surveyIdxPlots(SIQ1,dd,cols=ages,alt.idx=strat.mean,grid[[3]],par=list(mfrow=c(3,3)),legend=FALSE,
 ##'                select="index",plotByAge=FALSE)
-##' 
+##'
 ##' surveyIdxPlots(SIQ1,dd,cols=ages,alt.idx=NULL,grid[[3]],par=list(mfrow=c(3,3)),legend=FALSE,
 ##'                 colors=rev(heat.colors(8)),select="map",plotByAge=FALSE)
-##' 
+##'
 ##' surveyIdxPlots(SIQ1,dd,cols=ages,alt.idx=NULL,grid[[3]],par=list(mfrow=c(3,3)),
 ##'                 legend=FALSE,select="2",plotByAge=FALSE)
-##' 
+##'
 ##' ## Calculate internal concistency and export to file
 ##' internalCons(SIQ1$idx)
 ##' exportSI(SIQ1$idx,ages=ages,years=levels(dd$Year),toy=mean(dd$timeOfYear),file="out.dat",
@@ -89,14 +90,23 @@
 ##' @export
 getSurveyIdx <-
     function(x,ages,myids,kvecP=rep(12*12,length(ages)),kvecZ=rep(8*8,length(ages)),gamma=1.4,cutOff=1,fam="Gamma",useBIC=FALSE,nBoot=1000,mc.cores=1,method="ML",predD=NULL,
-             modelZ=rep("Year+s(lon,lat,k=kvecZ[a],bs='ts')+s(Ship,bs='re',by=dum)+s(Depth,bs='ts')+s(TimeShotHour,bs='cc')",length(ages)  ),modelP=rep("Year+s(lon,lat,k=kvecP[a],bs='ts')+s(Ship,bs='re',by=dum)+s(Depth,bs='ts')+s(TimeShotHour,bs='cc')",length(ages)  ),knotsP=NULL,knotsZ=NULL,predfix=NULL, ...
+             modelZ=rep("Year+s(lon,lat,k=kvecZ[a],bs='ts')+s(Ship,bs='re',by=dum)+s(Depth,bs='ts')+s(TimeShotHour,bs='cc')",length(ages)  ),modelP=rep("Year+s(lon,lat,k=kvecP[a],bs='ts')+s(Ship,bs='re',by=dum)+s(Depth,bs='ts')+s(TimeShotHour,bs='cc')",length(ages)  ),knotsP=NULL,knotsZ=NULL,predfix=NULL, useBam = FALSE, ...
              ){
-        
+
+        if (useBam) {
+            method <- "fREML"
+            cl <- makeCluster(mc.cores)
+            on.exit(stopCluster(cl))
+            gamf <- function(...) mgcv::bam(..., cluster = cl)
+        } else {
+            gamf <- mgcv::gam
+        }
+
         if(is.null(x$Nage)) stop("No age matrix 'Nage' found.");
         if(is.null(colnames(x$Nage))) stop("No colnames found on 'Nage' matrix.");
         if(length(modelP)<length(ages)) stop(" length(modelP) < length(ages)");
         if(length(kvecP)<length(ages)) stop(" length(kvecP) < length(ages)");
-        if(fam[1]!="Tweedie"){ 
+        if(fam[1]!="Tweedie"){
             if(length(modelZ)<length(ages)) stop(" length(modelZ) < length(ages)");
             if(length(kvecZ)<length(ages)) stop(" length(kvecZ) < length(ages)");
         }
@@ -113,14 +123,14 @@ getSurveyIdx <-
         gPreds=list() ##last data year's predictions
         gPreds2=list() ## all years predictions
         allobs=list() ## response vector (zeroes and positive)
-        
+
         yearNum=as.numeric(as.character(x$Year));
         yearRange=min(yearNum):max(yearNum);
 
         ## Choose most frequent gear as reference gear
         gearNames=names(xtabs(~Gear,data=x[[2]]))
         myGear=names(xtabs(~Gear,data=x[[2]]))[which.max(xtabs(~Gear,data=x[[2]]))]
-        
+
         resMat=matrix(NA,nrow=length(yearRange),ncol=length(ages));
         upMat=resMat;
         loMat=resMat;
@@ -141,33 +151,33 @@ getSurveyIdx <-
             if(famVec[a]=="LogNormal"){
                 f.pos = as.formula( paste( "log(A1) ~",modelP[a]));
                 f.0 = as.formula( paste( "A1>",cutOff," ~",modelZ[a]));
-                
-                print(system.time(m.pos<-tryCatch.W.E(gam(f.pos,data=subset(ddd,A1>cutOff),gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
+
+                print(system.time(m.pos<-tryCatch.W.E(gamf(f.pos,data=subset(ddd,A1>cutOff),gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
 
                 if(class(m.pos)[2] == "error") {
                     print(m.pos)
                     stop("Error occured for age ", a, " in the positive part of the model\n", "Try reducing the number of age groups or decrease the basis dimension of the smooths, k\n")
                 }
-                
-                print(system.time(m0<-tryCatch.W.E(gam(f.0,gamma=gammaZ,data=ddd,family="binomial",method=method,knots=knotsZ,na.action=na.fail,...))$value));
+
+                print(system.time(m0<-tryCatch.W.E(gamf(formula=f.0,gamma=gammaZ,data=ddd,family="binomial",method=method,knots=knotsZ,na.action=na.fail,...))$value));
 
                 if(class(m0)[2] == "error") {
                     print(m0)
                     stop("Error occured for age ", a, " in the binomial part of the model\n", "Try reducing the number of age groups or decrease the basis dimension of the smooths, k\n")
                 }
-                
+
             } else if(famVec[a]=="Gamma"){
                 f.pos = as.formula( paste( "A1 ~",modelP[a]));
                 f.0 = as.formula( paste( "A1>",cutOff," ~",modelZ[a]));
-                
-                print(system.time(m.pos<-tryCatch.W.E(gam(f.pos,data=subset(ddd,A1>cutOff),family=Gamma(link="log"),gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
+
+                print(system.time(m.pos<-tryCatch.W.E(gamf(formula=f.pos,data=subset(ddd,A1>cutOff),family=Gamma(link="log"),gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
 
                 if(class(m.pos)[2] == "error") {
                     print(m.pos)
                     stop("Error occured for age ", a, " in the positive part of the model\n", "Try reducing the number of age groups or decrease the basis dimension of the smooths, k\n")
                 }
-                
-                print(system.time(m0<-tryCatch.W.E(gam(f.0,gamma=gammaZ,data=ddd,family="binomial",method=method,knots=knotsZ,na.action=na.fail,...))$value));
+
+                print(system.time(m0<-tryCatch.W.E(gamf(formula=f.0,gamma=gammaZ,data=ddd,family="binomial",method=method,knots=knotsZ,na.action=na.fail,...))$value));
 
                 if(class(m0)[2] == "error") {
                     print(m0)
@@ -177,7 +187,7 @@ getSurveyIdx <-
                 ddd$A1[ ddd$A1<cutOff ] = 0
                 pd = ddd
                 f.pos = as.formula( paste( "A1 ~",modelP[a]));
-                print(system.time(m.pos<-tryCatch.W.E(gam(f.pos,data=ddd,family=tw,gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
+                print(system.time(m.pos<-tryCatch.W.E(gamf(formula=f.pos,data=ddd,family=tw,gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
                 if(class(m.pos)[2] == "error") {
                     print(m.pos)
                     stop("Error occured for age ", a, ".\n", "Try reducing the number of age groups or decrease the basis dimension of the smooths, k\n")
@@ -186,7 +196,7 @@ getSurveyIdx <-
             } else if(famVec[a]=="negbin"){
                 pd = ddd
                 f.pos = as.formula( paste( "A1 ~",modelP[a]));
-                print(system.time(m.pos<-tryCatch.W.E(gam(f.pos,data=ddd,family=nb,gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
+                print(system.time(m.pos<-tryCatch.W.E(gamf(formula=f.pos,data=ddd,family=nb,gamma=gammaPos,method=method,knots=knotsP,na.action=na.fail,...))$value));
                 if(class(m.pos)[2] == "error") {
                     print(m.pos)
                     stop("Error occured for age ", a, ".\n", "Try reducing the number of age groups or decrease the basis dimension of the smooths, k\n")
@@ -198,21 +208,21 @@ getSurveyIdx <-
                 totll = logLik(m.pos)[1]
             } else {
                 p0p =(1-predict(m0,type="response"))
-                ppos=p0p[ddd$A1>cutOff] 
+                ppos=p0p[ddd$A1>cutOff]
                 p0m1=p0p[ddd$A1<=cutOff]
                 if(famVec[a]=="Gamma")  totll=sum(log(p0m1))+sum(log(1-ppos))+logLik(m.pos)[1];
                 ## if logNormal model, we must transform til log-likelihood to be able to use AIC
                 ## L(y) = prod( dnorm( log y_i, mu_i, sigma^2) * ( 1 / y_i ) ) => logLik(y) = sum( log[dnorm(log y_i, mu_i, sigma^2)]  - log( y_i ) )
                 if(famVec[a]=="LogNormal") totll=sum(log(p0m1))+ sum(log(1-ppos)) + logLik(m.pos)[1] - sum(m.pos$y);
             }
-            
+
             if(is.null(predD)) predD=subset(ddd,haul.id %in% myids);
             res=numeric(length(yearRange));
             lores=res;
             upres=res;
             gp2=list()
-            
-            for(y in levels(ddd$Year)){ 
+
+            for(y in levels(ddd$Year)){
                 ## take care of years with all zeroes
                 if(!any(ddd$A1[ddd$Year==y]>cutOff)){
                     res[which(as.character(yearRange)==y)]=0;
@@ -246,7 +256,7 @@ getSurveyIdx <-
                     next;
                 }
                 sig2=m.pos$sig2;
-                
+
                 if(famVec[a]=="Gamma") { res[which(as.character(yearRange)==y)] = sum(p.0*exp(p.1)); gPred=p.0*exp(p.1) }
                 if(famVec[a]=="LogNormal")  { res[which(as.character(yearRange)==y)] = sum(p.0*exp(p.1+sig2/2)); gPred=p.0*exp(p.1+sig2/2) }
                 if(famVec[a] %in% c("Tweedie","negbin"))  { res[which(as.character(yearRange)==y)] = sum(exp(p.1)); gPred=exp(p.1) }
@@ -262,8 +272,8 @@ getSurveyIdx <-
                         terms.0=terms(m0)
                         if(!is.null(m0$offset)){
                             off.num.0 <- attr(terms.0, "offset")
-                            
-                            for (i in off.num.0) OS0 <- OS0 + eval(attr(terms.0, 
+
+                            for (i in off.num.0) OS0 <- OS0 + eval(attr(terms.0,
                                                                         "variables")[[i + 1]], predD)
                         }
                         rep0=ilogit(Xp.0%*%t(brp.0)+OS0);
@@ -272,17 +282,17 @@ getSurveyIdx <-
                     terms.pos=terms(m.pos)
                     if(!is.null(m.pos$offset)){
                         off.num.pos <- attr(terms.pos, "offset")
-                        
-                        for (i in off.num.pos) OS.pos <- OS.pos + eval(attr(terms.pos, 
+
+                        for (i in off.num.pos) OS.pos <- OS.pos + eval(attr(terms.pos,
                                                                             "variables")[[i + 1]], predD)
                     }
-                    
-                    
+
+
                     if(famVec[a]=="LogNormal"){
                         rep1=exp(Xp.1%*%t(brp.1)+sig2/2+OS.pos);
                     } else {
                         rep1=exp(Xp.1%*%t(brp.1)+OS.pos);
-                    } 
+                    }
 
                     if(!famVec[a] %in% c("Tweedie","negbin")){
                         idxSamp = colSums(rep0*rep1);
@@ -320,7 +330,7 @@ getSurveyIdx <-
 
 
 ##' Re-compute standardized survey indices for an alternative grid from a previous fitted "surveyIdx" model.
-##' 
+##'
 ##' @title Re-compute standardized survey indices for an alternative grid from a previous fitted "surveyIdx" model.
 ##' @param x DATRASraw dataset
 ##' @param model object of class "surveyIdx" as created by "getSurveyIdx"
@@ -332,20 +342,20 @@ getSurveyIdx <-
 ##' @return An object of class "surveyIdx"
 ##' @importFrom MASS mvrnorm
 ##' @export
-redoSurveyIndex<-function(x,model,predD=NULL,myids,nBoot=1000,predfix,mc.cores=1){        
+redoSurveyIndex<-function(x,model,predD=NULL,myids,nBoot=1000,predfix,mc.cores=1){
     ages = as.numeric(colnames(model$idx))
     dataAges <- model$dataAges
     famVec = model$family
     cutOff = model$cutOff
-    
+
     yearNum=model$yearNum
     yearRange=min(yearNum):max(yearNum);
 
     gPreds=list() ##last data year's predictions
     gPreds2=list() ## all years predictions
-    
-    myGear=model$refGear 
-    
+
+    myGear=model$refGear
+
     resMat=matrix(NA,nrow=length(yearRange),ncol=length(ages));
     upMat=resMat;
     loMat=resMat;
@@ -362,7 +372,7 @@ redoSurveyIndex<-function(x,model,predD=NULL,myids,nBoot=1000,predfix,mc.cores=1
         upres=res;
         gp2=list()
         do.one.y<-function(y){
-            
+
             cat("Doing year ",y,"\n")
             ## take care of years with all zeroes
             if(!any(ddd$A1[ddd$Year==y]>cutOff)){
@@ -395,7 +405,7 @@ redoSurveyIndex<-function(x,model,predD=NULL,myids,nBoot=1000,predfix,mc.cores=1
             if(famVec[a]=="Gamma") { idx <- sum(p.0*exp(p.1)); gPred=p.0*exp(p.1) }
             if(famVec[a]=="LogNormal")  { idx <- sum(p.0*exp(p.1+sig2/2)); gPred=p.0*exp(p.1+sig2/2) }
             if(famVec[a] %in% c("Tweedie","negbin"))  { idx <- sum(exp(p.1)); gPred=exp(p.1) }
-            
+
             if(nBoot>10){
                 Xp.1=predict(m.pos,newdata=predD,type="lpmatrix");
                 brp.1=mvrnorm(n=nBoot,coef(m.pos),m.pos$Vp);
@@ -407,8 +417,8 @@ redoSurveyIndex<-function(x,model,predD=NULL,myids,nBoot=1000,predfix,mc.cores=1
                     terms.0=terms(m0)
                     if(!is.null(m0$offset)){
                         off.num.0 <- attr(terms.0, "offset")
-                        
-                        for (i in off.num.0) OS0 <- OS0 + eval(attr(terms.0, 
+
+                        for (i in off.num.0) OS0 <- OS0 + eval(attr(terms.0,
                                                                     "variables")[[i + 1]], predD)
                     }
                     rep0=ilogit(Xp.0%*%t(brp.0)+OS0);
@@ -417,34 +427,34 @@ redoSurveyIndex<-function(x,model,predD=NULL,myids,nBoot=1000,predfix,mc.cores=1
                 terms.pos=terms(m.pos)
                 if(!is.null(m.pos$offset)){
                     off.num.pos <- attr(terms.pos, "offset")
-                    
-                    for (i in off.num.pos) OS.pos <- OS.pos + eval(attr(terms.pos, 
+
+                    for (i in off.num.pos) OS.pos <- OS.pos + eval(attr(terms.pos,
                                                                         "variables")[[i + 1]], predD)
                 }
-                
-                
+
+
                 if(famVec[a]=="LogNormal"){
                     rep1=exp(Xp.1%*%t(brp.1)+sig2/2+OS.pos);
                 } else {
                     rep1=exp(Xp.1%*%t(brp.1)+OS.pos);
-                } 
+                }
 
                 if(!famVec[a] %in% c("Tweedie","negbin")){
                     idxSamp = colSums(rep0*rep1);
                 } else {
                     idxSamp = colSums(rep1);
                 }
-                
+
                 return(list(res=idx,upres=quantile(idxSamp,0.975),lores=quantile(idxSamp,0.025),gp2=gPred))
             }
         } ## rof years
         yres = parallel::mclapply(levels(ddd$Year),do.one.y,mc.cores=mc.cores)
         for(y in levels(ddd$Year)) {
-            ii = which(as.character(yearRange)==y) 
+            ii = which(as.character(yearRange)==y)
             res[ii] = yres[[ii]]$res
             upres[ii] = yres[[ii]]$upres
             lores[ii] = yres[[ii]]$lores
-            gp2[[y]] = yres[[ii]]$gp2            
+            gp2[[y]] = yres[[ii]]$gp2
         }
         list(res=res,m.pos=m.pos,m0=m0,lo=lores,up=upres,gp=tail(gp2,1),gp2=gp2);
     }## end do.one
